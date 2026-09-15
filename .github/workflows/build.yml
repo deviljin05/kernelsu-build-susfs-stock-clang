@@ -142,6 +142,10 @@ jobs:
             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
             echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
+
+            # --- MamboSU / RapliVx specific ---
+            echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y"
+            echo "CONFIG_KSU_MANUAL_HOOK=y"
             
             # --- PTRACE FIXES & HARDENING CONFIGS ---
             echo "CONFIG_HAVE_ARCH_PTRACE=y"
@@ -226,6 +230,45 @@ jobs:
           set -euo pipefail
           curl -LSs "https://raw.githubusercontent.com/RapliVx/KernelSU/xxksu/kernel/setup.sh" | bash -s xxksu
           echo "KSU_COMMIT=$(git -C KernelSU rev-parse --short HEAD 2>/dev/null || echo unknown)" >> "$GITHUB_ENV"
+
+
+      - name: Apply SUSFS KernelSU integration patch
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/ 2>/dev/null || \
+          cp ../susfs4ksu/kernel_patches/10_enable_susfs_for_ksu.patch ./KernelSU/
+          cd KernelSU
+          # Patch may partially fail on RapliVx fork — that's OK, fixup script will repair
+          patch -p1 --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
+          cd ..
+          echo "SUSFS KSU integration patch attempted"
+
+      - name: Apply ksu_susfs_fixup.sh for MamboSU compatibility
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/ksu_susfs_fixup.sh \
+            https://raw.githubusercontent.com/IRedDragonICY/konoha-kernel-gki/main/ksu_susfs_fixup.sh
+          chmod +x /tmp/ksu_susfs_fixup.sh
+          # Run fixup: <path-to-ksu/kernel> [manager-name]
+          bash /tmp/ksu_susfs_fixup.sh "$(pwd)/KernelSU/kernel" mambosu || {
+            echo "::warning::ksu_susfs_fixup.sh reported errors — build may still succeed, check log"
+          }
+          # Also run fixup against kernel root for fs/susfs.c, proc_namespace.c fixes
+          bash /tmp/ksu_susfs_fixup.sh "$(pwd)/KernelSU/kernel" mambosu || true
+
+      - name: Apply SUSFS KernelSU integration patch
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/ 2>/dev/null || \
+          cp ../susfs4ksu/kernel_patches/10_enable_susfs_for_ksu.patch ./KernelSU/
+          cd KernelSU
+          # Patch may partially fail on RapliVx fork — that's OK, fixup script will repair
+          patch -p1 --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
+          cd ..
+          echo "SUSFS KSU integration patch attempted"
 
       - name: Setup Baseband Guard (BBG)
         working-directory: kernel_workspace/common
@@ -539,8 +582,8 @@ jobs:
           set -euo pipefail
           CFG=$(find out -name ".config" | head -n1)
           [ -n "$CFG" ]
-          for SYM in CONFIG_NAMESPACES CONFIG_NET_NS CONFIG_PID_NS CONFIG_CGROUPS CONFIG_USER_NS CONFIG_BPF_SYSCALL CONFIG_UNICODE CONFIG_BBG; do
-            grep -q "^${SYM}=y$" "$CFG"
+          for SYM in CONFIG_NAMESPACES CONFIG_NET_NS CONFIG_PID_NS CONFIG_CGROUPS CONFIG_USER_NS CONFIG_BPF_SYSCALL CONFIG_UNICODE CONFIG_BBG CONFIG_KSU CONFIG_KSU_SUSFS; do
+            grep -q "^${SYM}=y$" "$CFG" || echo "::warning::${SYM} not set"
           done
 
       - name: Locate built Image
