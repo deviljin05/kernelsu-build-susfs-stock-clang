@@ -220,29 +220,18 @@ jobs:
             sed -i -e 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
           fi
 
-      - name: Setup KOWX712 KernelSU
+      - name: Setup KernelSU (official tiann)
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # Clone KOWX712/KernelSU official repo
-          git clone --depth=1 https://github.com/KOWX712/KernelSU.git KernelSU-KOWX712
-          cd KernelSU-KOWX712
-          echo "KSU_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          # Use official setup script to integrate
-          bash kernel/setup.sh "$(pwd)/.." 2>/dev/null || {
-            # Fallback: manual integration if setup.sh fails
-            echo "setup.sh failed, trying manual integration..."
-            cd ..
-            # Copy kernel directory to expected location
-            cp -r KernelSU-KOWX712/kernel ./KernelSU
-          }
-          cd ..
-          # Verify KernelSU integration
-          if [ ! -d "KernelSU" ] && [ ! -d "KernelSU-KOWX712" ]; then
-            echo "::error::KernelSU integration failed"
+          # Official KernelSU — yeh drivers/ provide karta hai
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash
+          # Verify drivers/ directory exist karti hai
+          if [ ! -d "drivers" ]; then
+            echo "::error::drivers/ directory still missing"
             exit 1
           fi
-          echo "KernelSU integration done"
+          echo "KernelSU driver integrated successfully"
 
       - name: Apply SUSFS KernelSU integration patch
         working-directory: kernel_workspace/common
