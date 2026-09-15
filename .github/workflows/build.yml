@@ -1,4 +1,4 @@
-name: Build Custom GKI Kernel (KernelSU + SUSFS + BBRv3)
+name: Build Custom GKI Kernel (KernelSU + SUSFS + BBRv3 + NetHunter)
 
 on:
   workflow_dispatch:
@@ -12,21 +12,13 @@ on:
         required: false
         default: ""
       kernelsu_tag:
-        description: "KernelSU tag to pin against (must match a susfs4ksu-supported version)"
+        description: "KernelSU tag to pin against"
         required: true
         default: "v0.9.5"
       device_name:
         description: "Optional label for artifact naming"
         required: false
         default: "gki-custom"
-      enable_gaming_perf_tune:
-        description: "Enable gaming/latency perf tweaks"
-        required: true
-        default: "false"
-      enable_performance_governor:
-        description: "Force CPU default governor to 'performance'"
-        required: true
-        default: "false"
 
 env:
   VERSION: android12-5.10
@@ -152,11 +144,11 @@ jobs:
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
             echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
 
-            # --- PTRACE FIXES & HARDENING CONFIGS ---
+            # PTRACE FIXES
             echo "CONFIG_HAVE_ARCH_PTRACE=y"
             echo "CONFIG_PTRACE=y"
 
-            # --- FULL eBPF SUPPORT CONFIGS & PATCHES ---
+            # eBPF SUPPORT
             echo "CONFIG_BPF=y"
             echo "CONFIG_BPF_SYSCALL=y"
             echo "CONFIG_BPF_JIT=y"
@@ -169,11 +161,19 @@ jobs:
             echo "CONFIG_BPF_STREAM_PARSER=y"
             echo "CONFIG_LWTUNNEL_BPF=y"
 
-            # --- UNICODE & UTF-8 FIXES CONFIGS ---
+            # UNICODE FIXES
             echo "CONFIG_UNICODE=y"
             echo "CONFIG_NLS_UTF8=y"
             echo "CONFIG_NLS_CODEPAGE_437=y"
             echo "CONFIG_NLS_ISO8859_1=y"
+
+            # MGLRU
+            echo "CONFIG_LRU_GEN=y"
+            echo "CONFIG_LRU_GEN_ENABLED=y"
+
+            # rtl8xxxu built-in driver (safe method)
+            echo "CONFIG_RTL8XXXU=m"
+            echo "CONFIG_RTL8XXXU_UNTESTED=y"
           } >> gki_defconfig
 
       - name: Copy SUSFS kernel patches
@@ -295,7 +295,6 @@ jobs:
           echo "=== sucompat.h after fix ==="
           grep -n "ksu_handle_faccessat\|ksu_handle_stat" "$H"
 
-          # Hard check: header declarations must reference struct filename, matching the .c definitions
           if ! grep -q "struct filename \*\*filename" "$H"; then
             echo "::error::sucompat.h still does not match sucompat.c signatures — integration incomplete"
             exit 1
@@ -426,146 +425,6 @@ jobs:
             echo "CONFIG_TMPFS_XATTR=y"
           } >> gki_defconfig
 
-      - name: Force performance governor
-        if: ${{ github.event.inputs.enable_performance_governor == 'true' }}
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          echo "CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y" >> arch/arm64/configs/gki_defconfig
-          # Some GKI defconfigs pin schedutil explicitly; make sure it doesn't win the "default y" race
-          sed -i '/^CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y$/d' arch/arm64/configs/gki_defconfig || true
-
-      - name: Apply gaming/latency perf tuning
-        if: ${{ github.event.inputs.enable_gaming_perf_tune == 'true' }}
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          patch_default() {
-            local label="$1" old_re="$2" new="$3"; shift 3
-            local files=("$@")
-            local d='/'
-            for f in "${files[@]}"; do
-              [ -f "$f" ] || continue
-              if grep -qE -- "$old_re" "$f"; then
-                if sed -i -E "s${d}${old_re}${d}${new}${d}" "$f"; then
-                  echo "  [ok] ${label} (in $f)"
-                  return 0
-                else
-                  echo "::warning::gaming-perf-tune: '${label}' matched in $f but sed edit failed, skipped"
-                  return 1
-                fi
-              fi
-            done
-            echo "::warning::gaming-perf-tune: '${label}' pattern not found, skipped (kernel version drift)"
-            return 1
-          }
-
-          echo "Kconfig: allow force-loading mismatched vendor modules"
-          echo "CONFIG_MODULE_FORCE_LOAD=y" >> arch/arm64/configs/gki_defconfig
-
-          echo "Reducing VFS cache pressure default (fs/dcache.c)"
-          patch_default "vfs_cache_pressure default 100->50" \
-            'int[[:space:]]+sysctl_vfs_cache_pressure[[:space:]]+__read_mostly[[:space:]]*=[[:space:]]*100;' \
-            'int sysctl_vfs_cache_pressure __read_mostly = 50;' \
-            fs/dcache.c || true
-
-          echo "Reducing freeze timeout (kernel/power/process.c, 20s->1s)"
-          patch_default "freeze_timeout_msecs 20000->1000" \
-            'freeze_timeout_msecs[[:space:]]*=[[:space:]]*20[[:space:]]*\*[[:space:]]*MSEC_PER_SEC;' \
-            'freeze_timeout_msecs = 1 * MSEC_PER_SEC;' \
-            kernel/power/process.c kernel/power/main.c kernel/power/suspend.c || true
-
-          echo "Reducing F2FS urgent GC sleep time (fs/f2fs/gc.h, 500ms->50ms)"
-          patch_default "F2FS urgent GC sleep 500->50" \
-            '#define[[:space:]]+DEF_GC_THREAD_URGENT_SLEEP_TIME[[:space:]]+500' \
-            '#define DEF_GC_THREAD_URGENT_SLEEP_TIME\t50' \
-            fs/f2fs/gc.h fs/f2fs/f2fs.h || true
-
-          echo "Increasing PCI PME poll timeout (drivers/pci/pci.c, 1s->4s)"
-          patch_default "PME_TIMEOUT 1000->4000" \
-            '#define[[:space:]]+PME_TIMEOUT[[:space:]]+1000' \
-            '#define PME_TIMEOUT\t4000' \
-            drivers/pci/pci.c || true
-
-          echo "Raising cpuidle teo governor default rating"
-          patch_default "teo governor rating 19->25" \
-            '\.rating[[:space:]]*=[[:space:]]*19,' \
-            '.rating =\t25,' \
-            drivers/cpuidle/governors/teo.c || true
-
-          echo "Raising ext4 default journal commit interval (5s->30s)"
-          patch_default "ext4/jbd2 commit interval 5s->30s" \
-            '#define[[:space:]]+JBD2_DEFAULT_MAX_COMMIT_AGE[[:space:]]+5' \
-            '#define JBD2_DEFAULT_MAX_COMMIT_AGE\t30' \
-            include/linux/jbd2.h fs/jbd2/journal.c || true
-
-          echo "Lowering vm_swappiness default (60->30) for less aggressive swapping"
-          patch_default "vm_swappiness 60->30" \
-            'int[[:space:]]+vm_swappiness[[:space:]]*=[[:space:]]*60;' \
-            'int vm_swappiness = 30;' \
-            mm/vmscan.c || true
-
-          echo "Reducing CFS scheduler latency (6ms->4ms) for snappier task switching"
-          patch_default "sysctl_sched_latency 6000000->4000000" \
-            'unsigned[[:space:]]+int[[:space:]]+sysctl_sched_latency[[:space:]]*=[[:space:]]*6000000ULL;' \
-            'unsigned int sysctl_sched_latency = 4000000ULL;' \
-            kernel/sched/fair.c || true
-
-          echo "Reducing CFS min granularity (0.75ms->0.5ms)"
-          patch_default "sysctl_sched_min_granularity 750000->500000" \
-            'unsigned[[:space:]]+int[[:space:]]+sysctl_sched_min_granularity[[:space:]]*=[[:space:]]*750000ULL;' \
-            'unsigned int sysctl_sched_min_granularity = 500000ULL;' \
-            kernel/sched/fair.c || true
-
-          echo "Reducing CFS wakeup granularity (1ms->0.5ms) for faster preemption on wake"
-          patch_default "sysctl_sched_wakeup_granularity 1000000->500000" \
-            'unsigned[[:space:]]+int[[:space:]]+sysctl_sched_wakeup_granularity[[:space:]]*=[[:space:]]*1000000UL;' \
-            'unsigned int sysctl_sched_wakeup_granularity = 500000UL;' \
-            kernel/sched/fair.c || true
-
-          echo "Reducing task migration cost (0.5ms->0.25ms) for faster load balancing across cores"
-          patch_default "sysctl_sched_migration_cost 500000->250000" \
-            'const_debug[[:space:]]+unsigned[[:space:]]+int[[:space:]]+sysctl_sched_migration_cost[[:space:]]*=[[:space:]]*500000UL;' \
-            'const_debug unsigned int sysctl_sched_migration_cost = 250000UL;' \
-            kernel/sched/fair.c || true
-
-          echo "Raising vm.max_map_count default (65530->1048576) for mmap-heavy games/emulators"
-          patch_default "DEFAULT_MAX_MAP_COUNT (USHRT_MAX-5)->1048576" \
-            '#define[[:space:]]+DEFAULT_MAX_MAP_COUNT[[:space:]]*\([[:space:]]*USHRT_MAX[[:space:]]*-[[:space:]]*MAPCOUNT_ELF_CORE_MARGIN[[:space:]]*\)' \
-            '#define DEFAULT_MAX_MAP_COUNT (1048576)' \
-            include/linux/mm.h || true
-
-          echo "Lowering dirty_background_ratio (10->5) to complement dirty_ratio tweak"
-          patch_default "dirty_background_ratio 10->5" \
-            'int[[:space:]]+dirty_background_ratio[[:space:]]*=[[:space:]]*10;' \
-            'int dirty_background_ratio = 5;' \
-            mm/page-writeback.c || true
-
-          echo "Reducing dirty page expire interval (30s->10s) to avoid large writeback stalls"
-          patch_default "dirty_expire_interval 3000->1000 (centisecs)" \
-            'unsigned[[:space:]]+int[[:space:]]+dirty_expire_interval[[:space:]]*=[[:space:]]*30[[:space:]]*\*[[:space:]]*100;' \
-            'unsigned int dirty_expire_interval = 10 * 100;' \
-            mm/page-writeback.c || true
-
-          echo "Raising min_free_kbytes floor slightly for smoother allocs under memory pressure"
-          patch_default "min_free_kbytes floor 128->256 (in pages, KB)" \
-            'int[[:space:]]+min_free_kbytes[[:space:]]*=[[:space:]]*1024;' \
-            'int min_free_kbytes = 2048;' \
-            mm/page_alloc.c || true
-
-          echo "Lowering dirty_ratio default for snappier writeback under load"
-          patch_default "vm dirty_ratio 20->10" \
-            'int[[:space:]]+vm_dirty_ratio[[:space:]]*=[[:space:]]*20;' \
-            'int vm_dirty_ratio = 10;' \
-            mm/page-writeback.c || true
-
-          echo "Enabling 1000Hz kernel tick (lower scheduling latency)"
-          echo "CONFIG_HZ_1000=y" >> arch/arm64/configs/gki_defconfig
-
-          echo "Enabling Kyber/Deadline I/O schedulers"
-          echo "CONFIG_MQ_IOSCHED_KYBER=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_MQ_IOSCHED_DEADLINE=y" >> arch/arm64/configs/gki_defconfig
-
       - name: Apply custom kernel branding
         working-directory: kernel_workspace/common
         run: |
@@ -622,19 +481,18 @@ jobs:
           CFG=$(find out -name ".config" | head -n1)
           [ -n "$CFG" ]
 
-          # Hard-fail on KSU/SUSFS-critical symbols — a missing one means a half-integrated build
           MISSING=0
           for SYM in CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_SU \
                      CONFIG_KSU_SYSCALL_HOOK CONFIG_KSU_SUSFS_SUS_PATH \
-                     CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_BBG; do
-            if ! grep -q "^${SYM}=y$" "$CFG"; then
-              echo "::error::${SYM} not set — KernelSU/SUSFS integration incomplete"
+                     CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_BBG CONFIG_LRU_GEN \
+                     CONFIG_NTSYNC CONFIG_RTL8XXXU; do
+            if ! grep -q "^${SYM}=y$" "$CFG" && ! grep -q "^${SYM}=m$" "$CFG"; then
+              echo "::error::${SYM} not set — integration incomplete"
               MISSING=1
             fi
           done
           [ "$MISSING" -eq 0 ] || exit 1
 
-          # Softer checks for surrounding features — warn only
           for SYM in CONFIG_NAMESPACES CONFIG_NET_NS CONFIG_PID_NS CONFIG_CGROUPS \
                      CONFIG_USER_NS CONFIG_BPF_SYSCALL CONFIG_UNICODE; do
             grep -q "^${SYM}=y$" "$CFG" || echo "::warning::${SYM} not set"
