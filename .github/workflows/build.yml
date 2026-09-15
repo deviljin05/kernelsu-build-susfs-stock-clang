@@ -1,4 +1,4 @@
-name: Build Custom GKI Kernel (KOWX712 KernelSU + SUSFS + BBRv3)
+name: Build Custom GKI Kernel (KernelSU + SUSFS + BBRv3)
 
 on:
   workflow_dispatch:
@@ -11,6 +11,10 @@ on:
         description: "SUSFS commit hash (leave empty = latest on gki-android12-5.10 branch)"
         required: false
         default: ""
+      kernelsu_tag:
+        description: "KernelSU tag to pin against (must match a susfs4ksu-supported version)"
+        required: true
+        default: "v0.9.5"
       device_name:
         description: "Optional label for artifact naming"
         required: false
@@ -62,14 +66,14 @@ jobs:
         run: mkdir -p "${CCACHE_DIR}"
 
       - name: Resolve manifest branch and optional pinned release tag
-        run: |    
+        run: |
           set -euo pipefail
           INPUT="${{ github.event.inputs.os_patch_level }}"
           if [ "${INPUT}" = "lts" ]; then
             MANIFEST_REF="common-${VERSION}-lts"
             PIN_REF=""
             PIN_TYPE=""
-          elif [[ "${INPUT}" =~ ^${VERSION}.[0-9]+_r[0-9]+$ ]]; then
+          elif [[ "${INPUT}" =~ ^${VERSION}\.[0-9]+_r[0-9]+$ ]]; then
             MANIFEST_REF="common-${VERSION}"
             PIN_REF="${INPUT}"
             PIN_TYPE="tag"
@@ -110,6 +114,7 @@ jobs:
         run: |
           set -euo pipefail
           SUBLEVEL="$(grep -m1 '^SUBLEVEL = ' common/Makefile | awk '{print $3}')"
+          [ -n "${SUBLEVEL}" ]
           echo "SUBLEVEL=${SUBLEVEL}" >> "$GITHUB_ENV"
 
       - name: Clone SUSFS4KSU
@@ -125,6 +130,7 @@ jobs:
 
       - name: Set SUSFS, Ptrace, eBPF & Unicode Configs
         run: |
+          set -euo pipefail
           cd kernel_workspace/common/arch/arm64/configs
           {
             echo "CONFIG_KSU=y"
@@ -132,21 +138,24 @@ jobs:
             echo "CONFIG_KPROBES=y"
             echo "CONFIG_KRETPROBES=y"
             echo "CONFIG_HAVE_SYSCALL_TRACEPOINTS=y"
+
             echo "CONFIG_KSU_SUSFS=y"
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
             echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
             echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_SU=y"
+            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
             echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
             echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
             echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
             echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
-            
+
             # --- PTRACE FIXES & HARDENING CONFIGS ---
             echo "CONFIG_HAVE_ARCH_PTRACE=y"
             echo "CONFIG_PTRACE=y"
-            
+
             # --- FULL eBPF SUPPORT CONFIGS & PATCHES ---
             echo "CONFIG_BPF=y"
             echo "CONFIG_BPF_SYSCALL=y"
@@ -159,7 +168,7 @@ jobs:
             echo "CONFIG_BPF_EVENTS=y"
             echo "CONFIG_BPF_STREAM_PARSER=y"
             echo "CONFIG_LWTUNNEL_BPF=y"
-            
+
             # --- UNICODE & UTF-8 FIXES CONFIGS ---
             echo "CONFIG_UNICODE=y"
             echo "CONFIG_NLS_UTF8=y"
@@ -168,8 +177,9 @@ jobs:
           } >> gki_defconfig
 
       - name: Copy SUSFS kernel patches
+        working-directory: kernel_workspace/common
         run: |
-          cd kernel_workspace/common
+          set -euo pipefail
           cp ../susfs4ksu/kernel_patches/fs/* ./fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
           cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch ./
@@ -182,7 +192,7 @@ jobs:
             perl -i -pe 's/(int|size_t)\s+this_len\s*=\s*min_t\s*\(\s*[^,]+,/size_t this_len = min_t(size_t,/' fs/proc/base.c
           fi
           if [ "${SUBLEVEL}" -le "117" ]; then
-            sed -i '#^[[:space:]]*/*$#,#^[[:space:]]*u32 mask = mark->mask & IN_ALL_EVENTS;$#d' fs/notify/fdinfo.c
+            sed -i '/^[[:space:]]*\/\*$/,/^[[:space:]]*u32 mask = mark->mask & IN_ALL_EVENTS;$/d' fs/notify/fdinfo.c
             perl -i -pe 's/\bmask,\s*mark->ignored_mask/inotify_mark_user_mask(mark)/g' fs/notify/fdinfo.c
             perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
           fi
@@ -197,6 +207,7 @@ jobs:
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
+          grep -q "set_nameidata(nd, old_dfd, fake_filename, NULL);" fs/namei.c
           sed -i 's/set_nameidata(nd, old_dfd, fake_filename, NULL);/set_nameidata(nd, old_dfd, fake_filename);/g' fs/namei.c
 
       - name: Revert android12-5.10 pre-patch compatibility fixes
@@ -217,27 +228,28 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${SUBLEVEL}" -le "209" ]; then
+            grep -q "goto show_pad;" fs/proc/task_mmu.c
             sed -i -e 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
           fi
 
-      - name: Setup KernelSU (official tiann)
+      - name: Setup KernelSU (pinned)
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # Official KernelSU — yeh drivers/ provide karta hai
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash
-          # Verify drivers/ directory exist karti hai
+          KSU_TAG="${{ github.event.inputs.kernelsu_tag }}"
+          echo "Pinning KernelSU to ${KSU_TAG}"
+          curl -fsSL "https://raw.githubusercontent.com/tiann/KernelSU/${KSU_TAG}/kernel/setup.sh" | bash -s "${KSU_TAG}"
           if [ ! -d "drivers" ]; then
-            echo "::error::drivers/ directory still missing"
+            echo "::error::drivers/ directory still missing after KernelSU setup"
             exit 1
           fi
-          echo "KernelSU driver integrated successfully"
+          echo "KERNELSU_TAG=${KSU_TAG}" >> "$GITHUB_ENV"
+          echo "KernelSU driver integrated successfully (${KSU_TAG})"
 
       - name: Apply SUSFS KernelSU integration patch
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # Find the KernelSU directory (either KernelSU or KernelSU-KOWX712)
           KSU_DIR=""
           if [ -d "KernelSU" ]; then
             KSU_DIR="KernelSU"
@@ -248,38 +260,22 @@ jobs:
             echo "::error::KernelSU directory not found"
             exit 1
           fi
-          
+          echo "KSU_DIR=${KSU_DIR}" >> "$GITHUB_ENV"
+
           cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./$KSU_DIR/ 2>/dev/null || \
           cp ../susfs4ksu/kernel_patches/10_enable_susfs_for_ksu.patch ./$KSU_DIR/
           cd $KSU_DIR
-          # Apply patch; may partially fail but that's OK for SUSFS integration
-          patch -p1 --fuzz=3 < 10_enable_susfs_for_ksu.patch || {
-            echo "::warning::SUSFS KSU patch partially failed, continuing..."
-          }
-          cd ..
-          echo "SUSFS KSU integration patch applied (with possible fuzz)"
+          patch -p1 --fuzz=3 < 10_enable_susfs_for_ksu.patch
+          echo "SUSFS KSU integration patch applied cleanly against ${KERNELSU_TAG}"
 
       - name: Apply ksu_susfs_fixup.sh for compatibility (if needed)
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # Find KernelSU directory
-          KSU_DIR=""
-          if [ -d "KernelSU" ]; then
-            KSU_DIR="KernelSU"
-          elif [ -d "KernelSU-KOWX712" ]; then
-            KSU_DIR="KernelSU-KOWX712"
-          fi
-          
           curl -fsSL -o /tmp/ksu_susfs_fixup.sh \
             https://raw.githubusercontent.com/IRedDragonICY/konoha-kernel-gki/main/ksu_susfs_fixup.sh
           chmod +x /tmp/ksu_susfs_fixup.sh
-          # Run fixup for KOWX712 (treat as official KernelSU)
-          bash /tmp/ksu_susfs_fixup.sh "$(pwd)/$KSU_DIR/kernel" || {
-            echo "::warning::fixup script reported errors, continuing..."
-          }
-          # Also run for kernel root fixes
-          bash /tmp/ksu_susfs_fixup.sh "$(pwd)/$KSU_DIR/kernel" || true
+          bash /tmp/ksu_susfs_fixup.sh "$(pwd)/$KSU_DIR/kernel"
 
       - name: Fix sucompat signature mismatch (SUSFS patch)
         working-directory: kernel_workspace/common
@@ -288,14 +284,22 @@ jobs:
           H=drivers/kernelsu/feature/sucompat.h
           C=drivers/kernelsu/feature/sucompat.c
           [ -f "$H" ] && [ -f "$C" ]
-          # Get actual signatures from .c
-          grep -n "^int ksu_handle_faccessat" $C || true
-          grep -n "^int ksu_handle_stat" $C || true
-          # Force .h to match .c
-          sed -i 's|^int ksu_handle_faccessat(int \*dfd, const char __user \*\*filename_user, int \*mode, int \*__unused_flags);|int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *__unused_flags);|' $H
-          sed -i 's|^int ksu_handle_stat(int \*dfd, const char __user \*\*filename_user, int \*flags);|int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);|' $H
+
+          echo "=== Actual signatures in sucompat.c ==="
+          grep -n "^int ksu_handle_faccessat" "$C" || true
+          grep -n "^int ksu_handle_stat" "$C" || true
+
+          sed -i 's|^int ksu_handle_faccessat(int \*dfd, const char __user \*\*filename_user, int \*mode, int \*__unused_flags);|int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *__unused_flags);|' "$H"
+          sed -i 's|^int ksu_handle_stat(int \*dfd, const char __user \*\*filename_user, int \*flags);|int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);|' "$H"
+
           echo "=== sucompat.h after fix ==="
-          grep -n "ksu_handle_faccessat\|ksu_handle_stat" $H
+          grep -n "ksu_handle_faccessat\|ksu_handle_stat" "$H"
+
+          # Hard check: header declarations must reference struct filename, matching the .c definitions
+          if ! grep -q "struct filename \*\*filename" "$H"; then
+            echo "::error::sucompat.h still does not match sucompat.c signatures — integration incomplete"
+            exit 1
+          fi
 
       - name: Setup Baseband Guard (BBG)
         working-directory: kernel_workspace/common
@@ -421,6 +425,15 @@ jobs:
             echo "CONFIG_TMPFS_POSIX_ACL=y"
             echo "CONFIG_TMPFS_XATTR=y"
           } >> gki_defconfig
+
+      - name: Force performance governor
+        if: ${{ github.event.inputs.enable_performance_governor == 'true' }}
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          echo "CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y" >> arch/arm64/configs/gki_defconfig
+          # Some GKI defconfigs pin schedutil explicitly; make sure it doesn't win the "default y" race
+          sed -i '/^CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y$/d' arch/arm64/configs/gki_defconfig || true
 
       - name: Apply gaming/latency perf tuning
         if: ${{ github.event.inputs.enable_gaming_perf_tune == 'true' }}
@@ -601,14 +614,29 @@ jobs:
           LLVM=1 \
           LLVM_IAS=1 \
           build/build.sh -j"$(nproc)"
-          
+
       - name: Verify final configs
         working-directory: kernel_workspace
         run: |
           set -euo pipefail
           CFG=$(find out -name ".config" | head -n1)
           [ -n "$CFG" ]
-          for SYM in CONFIG_NAMESPACES CONFIG_NET_NS CONFIG_PID_NS CONFIG_CGROUPS CONFIG_USER_NS CONFIG_BPF_SYSCALL CONFIG_UNICODE CONFIG_BBG CONFIG_KSU CONFIG_KSU_SUSFS; do
+
+          # Hard-fail on KSU/SUSFS-critical symbols — a missing one means a half-integrated build
+          MISSING=0
+          for SYM in CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_SU \
+                     CONFIG_KSU_SYSCALL_HOOK CONFIG_KSU_SUSFS_SUS_PATH \
+                     CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_BBG; do
+            if ! grep -q "^${SYM}=y$" "$CFG"; then
+              echo "::error::${SYM} not set — KernelSU/SUSFS integration incomplete"
+              MISSING=1
+            fi
+          done
+          [ "$MISSING" -eq 0 ] || exit 1
+
+          # Softer checks for surrounding features — warn only
+          for SYM in CONFIG_NAMESPACES CONFIG_NET_NS CONFIG_PID_NS CONFIG_CGROUPS \
+                     CONFIG_USER_NS CONFIG_BPF_SYSCALL CONFIG_UNICODE; do
             grep -q "^${SYM}=y$" "$CFG" || echo "::warning::${SYM} not set"
           done
 
