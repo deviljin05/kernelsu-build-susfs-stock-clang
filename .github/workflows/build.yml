@@ -123,15 +123,12 @@ jobs:
           fi
           echo "SUSFS_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      # ▼▼▼ यहाँ बदलाव किया गया है - ReSukiSU की जगह RapliVx का KernelSU सेटअप ▼▼▼
       - name: Setup RapliVx KernelSU (MamboSU)
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # xxksu ब्रांच का उपयोग करके setup.sh चलाएँ
           curl -LSs "https://raw.githubusercontent.com/RapliVx/KernelSU/xxksu/kernel/setup.sh" | bash -s xxksu
-          
-          # सुनिश्चित करें कि KernelSU डायरेक्टरी बन गई है
+
           if [ ! -d "KernelSU" ]; then
             echo "::error::KernelSU setup failed - directory not found"
             exit 1
@@ -152,12 +149,10 @@ jobs:
             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
             echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
-            
-            # --- PTRACE FIXES & HARDENING CONFIGS ---
+
             echo "CONFIG_HAVE_ARCH_PTRACE=y"
             echo "CONFIG_PTRACE=y"
-            
-            # --- FULL eBPF SUPPORT CONFIGS & PATCHES ---
+
             echo "CONFIG_BPF=y"
             echo "CONFIG_BPF_SYSCALL=y"
             echo "CONFIG_BPF_JIT=y"
@@ -169,8 +164,7 @@ jobs:
             echo "CONFIG_BPF_EVENTS=y"
             echo "CONFIG_BPF_STREAM_PARSER=y"
             echo "CONFIG_LWTUNNEL_BPF=y"
-            
-            # --- UNICODE & UTF-8 FIXES CONFIGS ---
+
             echo "CONFIG_UNICODE=y"
             echo "CONFIG_NLS_UTF8=y"
             echo "CONFIG_NLS_CODEPAGE_437=y"
@@ -197,22 +191,80 @@ jobs:
             perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
           fi
 
-      # ▼▼▼ यहाँ बदलाव किया गया है - SUSFS पैच को सही जगह अप्लाई करें ▼▼▼
+      # ▼▼▼ SIRF YEH EK PATCH APPLY KARO - Kernel-level SUSFS patch ▼▼▼
       - name: Apply SUSFS kernel patch
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # RapliVx KernelSU के लिए 50_add_susfs_in_gki-android12-5.10.patch को common डायरेक्टरी में अप्लाई करें
           patch -p1 --fuzz=3 < 50_add_susfs_in_gki-android12-5.10.patch
 
-      # ▼▼▼ यहाँ बदलाव किया गया है - KernelSU डायरेक्टरी में SUSFS एनेबल पैच अप्लाई करें ▼▼▼
-      - name: Apply SUSFS enable patch for KernelSU
+      # ▼▼▼ 10_enable_susfs_for_ksu.patch BILKUL SKIP KARO ▼▼▼
+      # RapliVx kernel_workspace/common/KernelSU folder ke liye yeh patch kaam nahi karega.
+
+      - name: Manually add SUSFS config to KernelSU Kconfig
         working-directory: kernel_workspace/common/KernelSU
         run: |
           set -euo pipefail
-          # SUSFS रेपो से 10_enable_susfs_for_ksu.patch कॉपी करें और अप्लाई करें
-          cp ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
-          patch -p1 --fuzz=3 < 10_enable_susfs_for_ksu.patch
+          # KernelSU ke Kconfig mein SUSFS options add karo
+          if [ -f "kernel/Kconfig" ]; then
+            cat >> kernel/Kconfig << 'EOF'
+
+          config KSU_SUSFS
+              bool "KernelSU SUSFS Support"
+              depends on KSU
+              default y
+              help
+              Enable SUSFS support in KernelSU.
+
+          config KSU_SUSFS_SUS_PATH
+              bool "SUSFS SUS_PATH support"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_SUS_MOUNT
+              bool "SUSFS SUS_MOUNT support"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_SUS_KSTAT
+              bool "SUSFS SUS_KSTAT support"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_SPOOF_UNAME
+              bool "SUSFS SPOOF_UNAME support"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_ENABLE_LOG
+              bool "SUSFS ENABLE_LOG support"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+              bool "SUSFS HIDE_KSU_SUSFS_SYMBOLS support"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+              bool "SUSFS SPOOF_CMDLINE_OR_BOOTCONFIG support"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_OPEN_REDIRECT
+              bool "SUSFS OPEN_REDIRECT support"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_SUS_MAP
+              bool "SUSFS SUS_MAP support"
+              depends on KSU_SUSFS
+              default y
+          EOF
+            echo "[+] SUSFS configs added to KernelSU/kernel/Kconfig"
+          else
+            echo "::warning::KernelSU/kernel/Kconfig not found - skipping SUSFS config addition"
+          fi
 
       - name: Fix SUSFS set_nameidata argument mismatch
         working-directory: kernel_workspace/common
@@ -253,7 +305,6 @@ jobs:
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # add baseband_guard alongside selinux in the default LSM list
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
           if ! grep -q "baseband_guard" security/Kconfig; then
             echo "::error::baseband_guard not found in security/Kconfig after patch — BBG setup likely failed"
@@ -546,14 +597,14 @@ jobs:
           LLVM=1 \
           LLVM_IAS=1 \
           build/build.sh -j"$(nproc)"
-          
+
       - name: Verify final configs
         working-directory: kernel_workspace
         run: |
           set -euo pipefail
           CFG=$(find out -name ".config" | head -n1)
           [ -n "$CFG" ]
-          for SYM in CONFIG_NAMESPACES CONFIG_NET_NS CONFIG_PID_NS CONFIG_CGROUPS CONFIG_USER_NS CONFIG_BPF_SYSCALL CONFIG_UNICODE CONFIG_BBG; do
+          for SYM in CONFIG_NAMESPACES CONFIG_NET_NS CONFIG_PID_NS CONFIG_CGROUPS CONFIG_USER_NS CONFIG_BPF_SYSCALL CONFIG_UNICODE CONFIG_BBG CONFIG_KSU_SUSFS; do
             grep -q "^${SYM}=y$" "$CFG"
           done
 
