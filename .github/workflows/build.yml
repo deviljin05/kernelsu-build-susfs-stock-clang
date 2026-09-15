@@ -281,6 +281,22 @@ jobs:
           # Also run for kernel root fixes
           bash /tmp/ksu_susfs_fixup.sh "$(pwd)/$KSU_DIR/kernel" || true
 
+      - name: Fix sucompat signature mismatch (SUSFS patch)
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          H=drivers/kernelsu/feature/sucompat.h
+          C=drivers/kernelsu/feature/sucompat.c
+          [ -f "$H" ] && [ -f "$C" ]
+          # Get actual signatures from .c
+          grep -n "^int ksu_handle_faccessat" $C || true
+          grep -n "^int ksu_handle_stat" $C || true
+          # Force .h to match .c
+          sed -i 's|^int ksu_handle_faccessat(int \*dfd, const char __user \*\*filename_user, int \*mode, int \*__unused_flags);|int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *__unused_flags);|' $H
+          sed -i 's|^int ksu_handle_stat(int \*dfd, const char __user \*\*filename_user, int \*flags);|int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);|' $H
+          echo "=== sucompat.h after fix ==="
+          grep -n "ksu_handle_faccessat\|ksu_handle_stat" $H
+
       - name: Setup Baseband Guard (BBG)
         working-directory: kernel_workspace/common
         run: |
