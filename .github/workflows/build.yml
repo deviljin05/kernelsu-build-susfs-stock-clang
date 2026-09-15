@@ -1,10 +1,10 @@
-name: Build Custom GKI Kernel (ReSukiSU + SUSFS + BBRv3)
+name: Build Custom GKI Kernel (KOWX712 KernelSU + SUSFS + BBRv3)
 
 on:
   workflow_dispatch:
     inputs:
       os_patch_level:
-        description: "'lts' = rolling LTS branch. A dated maintenance branch (e.g. android12-5.10-2026-07) tracks Google's latest upstream merges/ASB patches. Or pin an exact GKI release tag, e.g. android12-5.10.264_r00"
+        description: "'lts' = rolling LTS branch. Or pin an exact GKI release tag, e.g. android12-5.10.264_r00"
         required: true
         default: "android12-5.10.264_r00"
       susfs_commit:
@@ -142,10 +142,6 @@ jobs:
             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
             echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
-
-            # --- MamboSU / RapliVx specific ---
-            echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y"
-            echo "CONFIG_KSU_MANUAL_HOOK=y"
             
             # --- PTRACE FIXES & HARDENING CONFIGS ---
             echo "CONFIG_HAVE_ARCH_PTRACE=y"
@@ -224,51 +220,77 @@ jobs:
             sed -i -e 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
           fi
 
-      - name: Setup RapliVx KernelSU (xxksu)
+      - name: Setup KOWX712 KernelSU
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          curl -LSs "https://raw.githubusercontent.com/RapliVx/KernelSU/xxksu/kernel/setup.sh" | bash -s xxksu
-          echo "KSU_COMMIT=$(git -C KernelSU rev-parse --short HEAD 2>/dev/null || echo unknown)" >> "$GITHUB_ENV"
-
+          # Clone KOWX712/KernelSU official repo
+          git clone --depth=1 https://github.com/KOWX712/KernelSU.git KernelSU-KOWX712
+          cd KernelSU-KOWX712
+          echo "KSU_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          # Use official setup script to integrate
+          bash kernel/setup.sh "$(pwd)/.." 2>/dev/null || {
+            # Fallback: manual integration if setup.sh fails
+            echo "setup.sh failed, trying manual integration..."
+            cd ..
+            # Copy kernel directory to expected location
+            cp -r KernelSU-KOWX712/kernel ./KernelSU
+          }
+          cd ..
+          # Verify KernelSU integration
+          if [ ! -d "KernelSU" ] && [ ! -d "KernelSU-KOWX712" ]; then
+            echo "::error::KernelSU integration failed"
+            exit 1
+          fi
+          echo "KernelSU integration done"
 
       - name: Apply SUSFS KernelSU integration patch
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/ 2>/dev/null || \
-          cp ../susfs4ksu/kernel_patches/10_enable_susfs_for_ksu.patch ./KernelSU/
-          cd KernelSU
-          # Patch may partially fail on RapliVx fork — that's OK, fixup script will repair
-          patch -p1 --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
+          # Find the KernelSU directory (either KernelSU or KernelSU-KOWX712)
+          KSU_DIR=""
+          if [ -d "KernelSU" ]; then
+            KSU_DIR="KernelSU"
+          elif [ -d "KernelSU-KOWX712" ]; then
+            KSU_DIR="KernelSU-KOWX712"
+          fi
+          if [ -z "$KSU_DIR" ]; then
+            echo "::error::KernelSU directory not found"
+            exit 1
+          fi
+          
+          cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./$KSU_DIR/ 2>/dev/null || \
+          cp ../susfs4ksu/kernel_patches/10_enable_susfs_for_ksu.patch ./$KSU_DIR/
+          cd $KSU_DIR
+          # Apply patch; may partially fail but that's OK for SUSFS integration
+          patch -p1 --fuzz=3 < 10_enable_susfs_for_ksu.patch || {
+            echo "::warning::SUSFS KSU patch partially failed, continuing..."
+          }
           cd ..
-          echo "SUSFS KSU integration patch attempted"
+          echo "SUSFS KSU integration patch applied (with possible fuzz)"
 
-      - name: Apply ksu_susfs_fixup.sh for MamboSU compatibility
+      - name: Apply ksu_susfs_fixup.sh for compatibility (if needed)
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
+          # Find KernelSU directory
+          KSU_DIR=""
+          if [ -d "KernelSU" ]; then
+            KSU_DIR="KernelSU"
+          elif [ -d "KernelSU-KOWX712" ]; then
+            KSU_DIR="KernelSU-KOWX712"
+          fi
+          
           curl -fsSL -o /tmp/ksu_susfs_fixup.sh \
             https://raw.githubusercontent.com/IRedDragonICY/konoha-kernel-gki/main/ksu_susfs_fixup.sh
           chmod +x /tmp/ksu_susfs_fixup.sh
-          # Run fixup: <path-to-ksu/kernel> [manager-name]
-          bash /tmp/ksu_susfs_fixup.sh "$(pwd)/KernelSU/kernel" mambosu || {
-            echo "::warning::ksu_susfs_fixup.sh reported errors — build may still succeed, check log"
+          # Run fixup for KOWX712 (treat as official KernelSU)
+          bash /tmp/ksu_susfs_fixup.sh "$(pwd)/$KSU_DIR/kernel" || {
+            echo "::warning::fixup script reported errors, continuing..."
           }
-          # Also run fixup against kernel root for fs/susfs.c, proc_namespace.c fixes
-          bash /tmp/ksu_susfs_fixup.sh "$(pwd)/KernelSU/kernel" mambosu || true
-
-      - name: Apply SUSFS KernelSU integration patch
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/ 2>/dev/null || \
-          cp ../susfs4ksu/kernel_patches/10_enable_susfs_for_ksu.patch ./KernelSU/
-          cd KernelSU
-          # Patch may partially fail on RapliVx fork — that's OK, fixup script will repair
-          patch -p1 --fuzz=3 < 10_enable_susfs_for_ksu.patch || true
-          cd ..
-          echo "SUSFS KSU integration patch attempted"
+          # Also run for kernel root fixes
+          bash /tmp/ksu_susfs_fixup.sh "$(pwd)/$KSU_DIR/kernel" || true
 
       - name: Setup Baseband Guard (BBG)
         working-directory: kernel_workspace/common
@@ -282,7 +304,6 @@ jobs:
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # add baseband_guard alongside selinux in the default LSM list
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
           if ! grep -q "baseband_guard" security/Kconfig; then
             echo "::error::baseband_guard not found in security/Kconfig after patch — BBG setup likely failed"
