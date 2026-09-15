@@ -198,8 +198,29 @@ jobs:
           set -euo pipefail
           patch -p1 --fuzz=3 < 50_add_susfs_in_gki-android12-5.10.patch
 
-      # ▼▼▼ 10_enable_susfs_for_ksu.patch BILKUL SKIP KARO ▼▼▼
-      # RapliVx kernel_workspace/common/KernelSU folder ke liye yeh patch kaam nahi karega.
+      - name: Attempt SUSFS-for-KernelSU patch (diagnostic)
+        working-directory: kernel_workspace/common/KernelSU
+        run: |
+          set -euo pipefail
+          PATCH_FILE="../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+          if [ ! -f "$PATCH_FILE" ]; then
+            echo "::warning::10_enable_susfs_for_ksu.patch not found at expected path — searching repo"
+            find ../../susfs4ksu -iname '10_enable_susfs_for_ksu.patch' || true
+            echo "::error::Cannot locate the SUSFS-for-KernelSU patch. Without it, KernelSU will not define ksu_handle_*/susfs_* symbols and the final vmlinux link WILL fail with undefined-symbol errors (ksu_handle_setresuid, susfs_is_current_ksu_domain, etc). Do not continue blind — find the correct patch path for this SUSFS revision or the RapliVx-specific equivalent."
+            exit 1
+          fi
+
+          echo "[i] Dry-run against RapliVx KernelSU tree to check hunk compatibility..."
+          if patch -p1 --dry-run --fuzz=3 < "$PATCH_FILE"; then
+            echo "[+] Patch applies cleanly, applying for real"
+            patch -p1 --fuzz=3 < "$PATCH_FILE"
+          else
+            echo "::error::10_enable_susfs_for_ksu.patch does NOT apply cleanly against RapliVx/KernelSU (xxksu branch)."
+            echo "::error::This means RapliVx's fork has diverged from upstream KernelSU's file layout/function signatures in the spots SUSFS needs to hook (sucompat, selinux hide, fake status, input hooks, etc)."
+            echo "::error::The manual Kconfig-only stopgap that used to run here does NOT provide these symbols — it only sets bool options — so the build will fail at link time with undefined ksu_handle_*/susfs_* symbols."
+            echo "::error::Action needed: open this patch and RapliVx's KernelSU source side by side and hand-port the rejected hunks to RapliVx's actual file/function names, or find a RapliVx branch that already ships SUSFS hooks pre-integrated."
+            exit 1
+          fi
 
       - name: Manually add SUSFS config to KernelSU Kconfig
         working-directory: kernel_workspace/common/KernelSU
